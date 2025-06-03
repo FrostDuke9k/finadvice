@@ -27,3 +27,19 @@ CREATE TABLE IF NOT EXISTS DetectedChanges (
 -- You might want to add indexes later for performance on frequently queried columns, e.g.:
 -- CREATE INDEX IF NOT EXISTS idx_source_id_detected_at ON DetectedChanges(source_id, detected_at DESC);
 -- CREATE INDEX IF NOT EXISTS idx_monitoredsources_is_active ON MonitoredSources(is_active);
+
+-- Add this to your schema.sql file
+
+CREATE TABLE IF NOT EXISTS UserEnquiries (
+    id SERIAL PRIMARY KEY,
+    question_text TEXT NOT NULL,
+    timestamp_asked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Fields to store the information found and answer given:
+    -- This is a simplified version; we can expand it later.
+    -- For now, let's assume we'll store a summary of what was found and the AI's answer.
+    retrieved_context TEXT, -- Summary of relevant info found in your 'DetectedChanges' table
+    generated_answer TEXT,  -- The answer provided to the user
+    -- Optionally, link to specific rows in DetectedChanges if an answer is based on them
+    -- relevant_detected_change_ids INTEGER[], 
+    processing_status VARCHAR(50) DEFAULT 'pending' -- e.g., pending, answered, no_info_found
+);

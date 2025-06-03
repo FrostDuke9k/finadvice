@@ -148,7 +148,7 @@ def update_source_state(source_id, new_hash, new_summary):
                  cur.close()
             conn.close()
 
-def add_detected_change(source_id, previous_hash, new_hash, change_summary, ai_analysis, full_text_snippet, url_of_change):
+def add_detected_change(source_id, previous_hash, new_hash, change_summary, ai_analysis, full_text_snippet_from_change, url_of_change): # Parameter name updated
     """Adds a new detected change to the DetectedChanges table."""
     conn = None
     try:
@@ -158,7 +158,10 @@ def add_detected_change(source_id, previous_hash, new_hash, change_summary, ai_a
             INSERT INTO DetectedChanges
             (source_id, previous_content_hash, new_content_hash, change_summary_from_agent, raw_ai_analysis_result, full_text_snippet_from_change, url_of_change, detected_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """, (source_id, previous_hash, new_hash, change_summary, psycopg2.extras.Json(ai_analysis) if ai_analysis else None, full_text_snippet, url_of_change, datetime.now()))
+        """, (source_id, previous_hash, new_hash, change_summary, 
+              psycopg2.extras.Json(ai_analysis) if ai_analysis else None, 
+              full_text_snippet_from_change, # Variable updated to match parameter
+              url_of_change, datetime.now()))
         conn.commit()
         print(f"Detected change for source ID {source_id} added to database.")
     except psycopg2.Error as e:
@@ -169,4 +172,138 @@ def add_detected_change(source_id, previous_hash, new_hash, change_summary, ai_a
         if conn:
             if not cur.closed:
                  cur.close()
+            conn.close()
+
+def add_user_enquiry(question_text, retrieved_context=None, generated_answer=None, processing_status="pending"):
+    """Adds a new user enquiry to the UserEnquiries table."""
+    conn = None
+    entry_id = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO UserEnquiries (question_text, retrieved_context, generated_answer, processing_status, timestamp_asked)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id;
+        """, (question_text, retrieved_context, generated_answer, processing_status, datetime.now()))
+        entry_id = cur.fetchone()[0] # Get the ID of the newly inserted row
+        conn.commit()
+        print(f"User enquiry added to database with ID: {entry_id}")
+        return entry_id
+    except psycopg2.Error as e:
+        print(f"Error adding user enquiry: {e}")
+        if conn:
+            conn.rollback()
+        return None
+    finally:
+        if conn:
+            if not cur.closed:
+                 cur.close()
+            conn.close()
+
+def update_user_enquiry_answer(enquiry_id, retrieved_context, generated_answer, processing_status="answered"):
+    """Updates an existing user enquiry with the context found and the generated answer."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE UserEnquiries
+            SET retrieved_context = %s, generated_answer = %s, processing_status = %s
+            WHERE id = %s;
+        """, (retrieved_context, generated_answer, processing_status, enquiry_id))
+        conn.commit()
+        print(f"User enquiry ID {enquiry_id} updated with answer.")
+    except psycopg2.Error as e:
+        print(f"Error updating user enquiry ID {enquiry_id}: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            if not cur.closed:
+                cur.close()
+            conn.close()
+
+def search_knowledge_base(keywords: list):
+    """
+    Searches the DetectedChanges table for entries matching the given keywords.
+    Searches in 'change_summary_from_agent' and specific fields within 'raw_ai_analysis_result'.
+    """
+    if not keywords:
+        return []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+        # Constructing the WHERE clause for searching
+        # This is a basic example; more advanced text search (like full-text search)
+        # could be implemented for better results.
+        # We'll search for any of the keywords.
+
+        # Search conditions for text fields
+        text_search_conditions = []
+        for keyword in keywords:
+            # ILIKE for case-insensitive search
+            text_search_conditions.append(sql.SQL("change_summary_from_agent ILIKE %s"))
+            # Search within common JSONB text fields
+            text_search_conditions.append(sql.SQL("raw_ai_analysis_result->>'main_summary' ILIKE %s"))
+            text_search_conditions.append(sql.SQL("raw_ai_analysis_result->>'change_type' ILIKE %s"))
+            # To search in an array within JSONB (e.g., 'key_details'):
+            # text_search_conditions.append(sql.SQL("EXISTS (SELECT 1 FROM jsonb_array_elements_text(raw_ai_analysis_result->'key_details') AS elem WHERE elem ILIKE %s)"))
+
+
+        # Parameters for the query, ensuring each keyword is wrapped for ILIKE
+        query_params = []
+        for _ in range(len(keywords)): # For each keyword, we have multiple fields to check
+            for keyword in keywords: # This repetition is not ideal, let's refine
+                # This needs to be structured so each keyword is tried against each condition group
+                pass # Will restructure below
+
+        # Let's refine the query construction for clarity and correctness
+        # We want to find rows where ANY of the keywords match in ANY of the target fields.
+
+        # Build individual LIKE conditions for each keyword
+        keyword_like_patterns = [f"%{kw}%" for kw in keywords]
+
+        # Build OR conditions for each field for all keywords
+        # This can get complex quickly with many keywords and fields.
+        # A simpler approach for now: search if any keyword appears in main_summary or change_summary_from_agent
+
+        # Simpler query: Check if any keyword is in main_summary or change_summary_from_agent
+        # This example uses OR logic: find if *any* keyword matches.
+        conditions = []
+        params = []
+        for pattern in keyword_like_patterns:
+            conditions.append(sql.SQL("change_summary_from_agent ILIKE %s"))
+            params.append(pattern)
+            conditions.append(sql.SQL("raw_ai_analysis_result->>'main_summary' ILIKE %s"))
+            params.append(pattern)
+            conditions.append(sql.SQL("raw_ai_analysis_result->>'change_type' ILIKE %s"))
+            params.append(pattern)
+            # Example for searching within a JSON array (like 'key_details' or 'affected_parties')
+            # This requires ensuring 'key_details' exists and is an array.
+            # conditions.append(sql.SQL("EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(raw_ai_analysis_result->'key_details', '[]'::jsonb)) AS elem WHERE elem ILIKE %s)"))
+            # params.append(pattern)
+
+
+        if not conditions:
+            return []
+
+        query_sql = sql.SQL("SELECT id, source_id, detected_at, change_summary_from_agent, raw_ai_analysis_result, url_of_change FROM DetectedChanges WHERE ") + sql.SQL(" OR ").join(conditions) + sql.SQL(" ORDER BY detected_at DESC LIMIT 10;")
+
+        # print(f"Search query: {query_sql.as_string(conn)}") # For debugging
+        # print(f"Search params: {params}") # For debugging
+
+        cur.execute(query_sql, params)
+        results = cur.fetchall()
+        return [dict(row) for row in results]
+
+    except psycopg2.Error as e:
+        print(f"Error searching knowledge base: {e}")
+        return []
+    finally:
+        if conn:
+            if not cur.closed:
+                cur.close()
             conn.close()
