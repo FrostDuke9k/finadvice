@@ -89,7 +89,6 @@ def analyze_content_for_changes_ai(previous_content_summary, current_content_sum
         }
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
-
     content_to_analyze = current_content_summary 
 
     if previous_content_summary == current_content_summary:
@@ -142,7 +141,6 @@ If the content seems trivial, a minor correction, or not substantially finance/t
         
         analysis_result = json.loads(ai_response_content)
         return analysis_result
-
     except json.JSONDecodeError as e:
         print(f"[{datetime.now()}] Error: Failed to decode JSON response from AI for {source_name}. Error: {e}")
         print(f"AI Response Content was: {ai_response_content}")
@@ -236,8 +234,69 @@ class LawMonitorAgent:
         
         return detected_changes_summary
 
+def synthesize_answer_with_ai(user_question, context_from_db):
+    """
+    Uses OpenAI to synthesize a helpful answer to a user's question based on
+    context retrieved from the internal knowledge base.
+    """
+    print(f"[{datetime.now()}] Synthesizing answer for: '{user_question}' using provided context.")
+
+    if not config.OPENAI_API_KEY:
+        print(f"[{datetime.now()}] Error: OPENAI_API_KEY not configured. Cannot synthesize answer.")
+        return "I am unable to process your request at this time due to a configuration issue. Please contact support."
+
+    if not context_from_db or context_from_db.strip() == "No specific information found in the local knowledge base for the given keywords." or context_from_db.strip() == "Placeholder: Internal search not yet implemented. Context from DB would go here.":
+        context_from_db = "No specific information was retrieved from the local knowledge base regarding this query."
+
+    client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+    system_prompt = """You are 'FinanceAdvisor', a helpful AI assistant specializing in UK finance and tax matters.
+Your goal is to provide clear, accurate, and concise answers based *primarily* on the context provided from an internal knowledge base.
+If the provided context is insufficient to answer the question confidently, clearly state that the information is not available in the current knowledge base rather than speculating.
+Always be polite and professional.
+Crucially, end every response with the following disclaimer: 'Disclaimer: This information is for guidance only and not professional financial advice. Please consult with a qualified financial advisor for advice tailored to your specific situation.'"""
+
+    user_prompt = f"""User question: "{user_question}"
+
+Provided context from internal knowledge base:
+---
+{context_from_db}
+---
+
+Based primarily on the provided context, please answer the user's question.
+If the context directly answers the question, summarize it clearly.
+If the context is related but doesn't directly answer, explain what information the context provides and why it might not fully answer the question.
+If the context is "No specific information was retrieved from the local knowledge base regarding this query." or similar, then state that you don't have specific information on that topic in your current knowledge base.
+Do not make up information beyond the provided context.
+Ensure the answer includes the mandatory disclaimer at the end.
+"""
+
+    try:
+        print(f"[{datetime.now()}] Sending question and context to OpenAI for answer synthesis...")
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo-0125",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.5 
+        )
+        
+        ai_answer = response.choices[0].message.content
+        print(f"[{datetime.now()}] Received synthesized answer from OpenAI.")
+        
+        disclaimer = "Disclaimer: This information is for guidance only and not professional financial advice. Please consult with a qualified financial advisor for advice tailored to your specific situation."
+        if disclaimer not in ai_answer:
+            ai_answer += f"\n\n{disclaimer}"
+            
+        return ai_answer
+
+    except Exception as e:
+        print(f"[{datetime.now()}] Error: An unexpected error occurred during AI answer synthesis: {e}")
+        return f"I apologize, but I encountered an error while trying to generate an answer. Please try again later.\n\n{disclaimer}"
+
 def handle_user_questions():
-    """Handles user questions by logging them and preparing for future processing."""
+    """Handles user questions by logging, searching DB, and synthesizing AI answers."""
     print("\n--- Fiscal Advisor Q&A ---")
     print("Type 'quit' to exit Q&A mode.")
     while True:
@@ -250,23 +309,43 @@ def handle_user_questions():
 
             print(f"Received question: '{user_question}'")
             
-            enquiry_id = database.add_user_enquiry(question_text=user_question, processing_status="received")
+            enquiry_id = database.add_user_enquiry(question_text=user_question, processing_status="processing_search")
             if not enquiry_id:
                 print("Could not log your question to the database. Please try again.")
                 continue
 
-            # Placeholder for searching internal knowledge base
-            print(f"Searching for information related to your question (ID: {enquiry_id})... (Search not implemented yet)")
-            retrieved_context_summary = "Placeholder: Internal search not yet implemented. Context from DB would go here."
+            keywords = [kw.lower() for kw in user_question.split() if len(kw) > 2]
+            print(f"Searching database with keywords: {keywords}")
 
-            # Placeholder for synthesizing answer with AI
-            print("Synthesizing answer... (AI Answering not implemented yet)")
-            generated_answer_text = f"Placeholder: This is a simulated answer to '{user_question}'. Actual AI response based on found data will be here."
-
-            # Update the enquiry in the database with placeholder/simulated answer
-            database.update_user_enquiry_answer(enquiry_id, retrieved_context_summary, generated_answer_text, processing_status="simulated_answer")
+            search_results = database.search_knowledge_base(keywords) 
             
-            print(f"Answer: {generated_answer_text}\n")
+            retrieved_context_summary = ""
+            if search_results:
+                print(f"Found {len(search_results)} potentially relevant item(s) in the knowledge base:")
+                context_parts = []
+                for i, result in enumerate(search_results[:3]): 
+                    print(f"  Result {i+1} Title/Summary: {result.get('change_summary_from_agent', 'N/A')}")
+                    if result.get('raw_ai_analysis_result'):
+                        ai_summary = result['raw_ai_analysis_result'].get('main_summary', '')
+                        key_details = result['raw_ai_analysis_result'].get('key_details', [])
+                        context_parts.append(f"Found information: {ai_summary} Key details: {', '.join(key_details if isinstance(key_details, list) else [str(key_details)])}")
+                    elif result.get('change_summary_from_agent'):
+                         context_parts.append(f"Found information: {result.get('change_summary_from_agent')}")
+
+                retrieved_context_summary = " ".join(context_parts)
+                if not retrieved_context_summary.strip():
+                     retrieved_context_summary = "Found some database entries but could not form a concise text summary from them."
+                print(f"Context for AI: {retrieved_context_summary[:500]}...") 
+            else:
+                print("No directly relevant information found in the current knowledge base for your keywords.")
+                retrieved_context_summary = "No specific information found in the local knowledge base for the given keywords."
+
+            generated_answer_text = synthesize_answer_with_ai(user_question, retrieved_context_summary)
+            
+            processing_status = "answered" if "I could not find specific information" not in generated_answer_text and "encountered an error" not in generated_answer_text else "no_info_found"
+            database.update_user_enquiry_answer(enquiry_id, retrieved_context_summary[:2000], generated_answer_text, processing_status=processing_status) 
+            
+            print(f"\nFinanceAdvisor says:\n{generated_answer_text}\n")
 
         except Exception as e:
             print(f"An error occurred in the Q&A loop: {e}")
@@ -284,12 +363,10 @@ if __name__ == "__main__":
     agent = LawMonitorAgent()
 
     try:
-        # Run one cycle of the monitoring agent first
         print("\nRunning an initial check for website updates...")
         agent.check_for_updates() 
         print("\nInitial website update check complete.")
 
-        # Start the Q&A mode
         handle_user_questions()
 
     except KeyboardInterrupt:

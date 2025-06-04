@@ -43,3 +43,17 @@ CREATE TABLE IF NOT EXISTS UserEnquiries (
     -- relevant_detected_change_ids INTEGER[], 
     processing_status VARCHAR(50) DEFAULT 'pending' -- e.g., pending, answered, no_info_found
 );
+
+-- Add to schema.sql if not already there
+CREATE TABLE IF NOT EXISTS KnowledgeEntries (
+    id SERIAL PRIMARY KEY,
+    topic VARCHAR(255) NOT NULL,       -- e.g., "Savings Schemes", "Tax", "Business Registration"
+    sub_topic VARCHAR(255),           -- e.g., "Help to Save", "Capital Gains", "Limited Companies"
+    knowledge_title TEXT,             -- A clear title, e.g., "Help to Save Scheme Details"
+    structured_data JSONB NOT NULL,   -- The main JSON object for this entry
+    source_url TEXT,                  -- URL of the original source, if available from the JSON
+    source_description TEXT,          -- Brief description of the source
+    manual_notes TEXT,                -- Any notes you add
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_reviewed_at TIMESTAMP WITH TIME ZONE
+);

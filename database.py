@@ -5,6 +5,7 @@ from psycopg2 import sql # For safe SQL query composition
 import csv # Import the csv module
 import config # Still needed for DATABASE_URL
 from datetime import datetime
+import json # For handling JSON data in knowledge entries
 
 # --- (get_db_connection, execute_schema, get_active_sources, update_source_state, add_detected_change functions remain the same as previously provided) ---
 def get_db_connection():
@@ -302,6 +303,57 @@ def search_knowledge_base(keywords: list):
     except psycopg2.Error as e:
         print(f"Error searching knowledge base: {e}")
         return []
+    finally:
+        if conn:
+            if not cur.closed:
+                cur.close()
+            conn.close()
+
+def add_knowledge_entry(topic, sub_topic, knowledge_title, structured_data_json, source_url=None, source_description=None, manual_notes=None):
+    """Adds a new knowledge entry to the KnowledgeEntries table."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Ensure structured_data_json is a valid JSON string for PostgreSQL's JSONB
+        # If it's already a Python dict, psycopg2 can handle it with extras.Json
+        if isinstance(structured_data_json, dict):
+            db_json_data = psycopg2.extras.Json(structured_data_json)
+        elif isinstance(structured_data_json, str):
+            # Validate if it's a JSON string, then let DB handle it, or parse and pass as dict
+            try:
+                parsed_json = json.loads(structured_data_json)
+                db_json_data = psycopg2.extras.Json(parsed_json)
+            except json.JSONDecodeError:
+                print(f"Warning: structured_data_json for '{knowledge_title}' is not a valid JSON string. Storing as plain text in notes or skipping.")
+                # Handle error appropriately, e.g., skip or store differently
+                # For this example, we'll try to insert what we have, but ideally, it should be valid JSON.
+                # If your JSONB column is NOT NULL, this will fail if db_json_data isn't set.
+                # Let's assume for now the input `structured_data_json` will be a Python dict.
+                raise ValueError("structured_data_json must be a dictionary or valid JSON string for JSONB field")
+
+        else:
+            raise ValueError("structured_data_json must be a dictionary or valid JSON string for JSONB field")
+
+        cur.execute("""
+            INSERT INTO KnowledgeEntries 
+            (topic, sub_topic, knowledge_title, structured_data, source_url, source_description, manual_notes, created_at, last_reviewed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+        """, (topic, sub_topic, knowledge_title, db_json_data, source_url, 
+              source_description, manual_notes, datetime.now(), datetime.now()))
+        entry_id = cur.fetchone()[0]
+        conn.commit()
+        print(f"Knowledge entry '{knowledge_title}' added with ID: {entry_id}")
+        return entry_id
+    except psycopg2.Error as e:
+        print(f"Error adding knowledge entry '{knowledge_title}': {e}")
+        if conn:
+            conn.rollback()
+        return None
+    except ValueError as ve:
+        print(f"ValueError for knowledge entry '{knowledge_title}': {ve}")
+        return None
     finally:
         if conn:
             if not cur.closed:
