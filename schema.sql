@@ -1,59 +1,22 @@
 -- schema.sql
 
--- Table to store the sources you are monitoring
-CREATE TABLE IF NOT EXISTS MonitoredSources (
-    id SERIAL PRIMARY KEY,                      -- Unique identifier for each source
-    name VARCHAR(255) UNIQUE NOT NULL,          -- Name of the source (e.g., "HMRC_Tax_Updates")
-    url TEXT NOT NULL,                          -- URL of the source
-    last_checked_at TIMESTAMP WITH TIME ZONE,   -- When this source was last checked
-    last_content_hash VARCHAR(32),              -- MD5 hash of the last known relevant content/summary
-    last_summary TEXT,                          -- The actual summary/content that was hashed
-    is_active BOOLEAN DEFAULT TRUE              -- Flag to easily enable/disable monitoring for a source
-);
-
--- Table to store detected changes and their AI analysis
-CREATE TABLE IF NOT EXISTS DetectedChanges (
-    id SERIAL PRIMARY KEY,                                  -- Unique identifier for each detected change
-    source_id INTEGER REFERENCES MonitoredSources(id) ON DELETE CASCADE, -- Links to the MonitoredSources table
-    detected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, -- When the change was detected and recorded
-    previous_content_hash VARCHAR(32),                      -- Hash of the content before this change (for context)
-    new_content_hash VARCHAR(32) NOT NULL,                  -- Hash of the new content that triggered this record
-    change_summary_from_agent TEXT,                         -- Brief summary of the change (could be from your extract_relevant_info or a high-level AI summary)
-    raw_ai_analysis_result JSONB,                           -- Store structured AI output (e.g., from OpenAI). JSONB is efficient for querying.
-    full_text_snippet_from_change TEXT,                     -- The relevant snippet of text identified as changed
-    url_of_change TEXT                                      -- Specific URL of the article/page if different from the main source URL (e.g., a direct link to a new announcement)
-);
-
--- You might want to add indexes later for performance on frequently queried columns, e.g.:
--- CREATE INDEX IF NOT EXISTS idx_source_id_detected_at ON DetectedChanges(source_id, detected_at DESC);
--- CREATE INDEX IF NOT EXISTS idx_monitoredsources_is_active ON MonitoredSources(is_active);
-
--- Add this to your schema.sql file
-
+-- Table to store user questions, AI-sourced information, and identified URLs
 CREATE TABLE IF NOT EXISTS UserEnquiries (
     id SERIAL PRIMARY KEY,
     question_text TEXT NOT NULL,
+    keywords TEXT[],                         -- Keywords extracted from the question for searching
     timestamp_asked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    -- Fields to store the information found and answer given:
-    -- This is a simplified version; we can expand it later.
-    -- For now, let's assume we'll store a summary of what was found and the AI's answer.
-    retrieved_context TEXT, -- Summary of relevant info found in your 'DetectedChanges' table
-    generated_answer TEXT,  -- The answer provided to the user
-    -- Optionally, link to specific rows in DetectedChanges if an answer is based on them
-    -- relevant_detected_change_ids INTEGER[], 
-    processing_status VARCHAR(50) DEFAULT 'pending' -- e.g., pending, answered, no_info_found
+    
+    ai_generated_information TEXT,           -- The primary answer or information synthesized by AI
+    ai_identified_urls TEXT[],             -- URLs suggested by AI as relevant
+    
+    fetched_content_summary TEXT,            -- Optional: A summary of content fetched from AI-identified URLs
+                                             -- (if your app fetches and processes them)
+
+    is_verified BOOLEAN DEFAULT FALSE,       -- For potential future admin/manual verification of the answer's quality
+    usage_count INTEGER DEFAULT 0,           -- How many times this stored answer was reused
+    source_of_answer VARCHAR(255)            -- e.g., 'live_ai_search_and_synthesis', 'cached_verified_response'
 );
 
--- Add to schema.sql if not already there
-CREATE TABLE IF NOT EXISTS KnowledgeEntries (
-    id SERIAL PRIMARY KEY,
-    topic VARCHAR(255) NOT NULL,       -- e.g., "Savings Schemes", "Tax", "Business Registration"
-    sub_topic VARCHAR(255),           -- e.g., "Help to Save", "Capital Gains", "Limited Companies"
-    knowledge_title TEXT,             -- A clear title, e.g., "Help to Save Scheme Details"
-    structured_data JSONB NOT NULL,   -- The main JSON object for this entry
-    source_url TEXT,                  -- URL of the original source, if available from the JSON
-    source_description TEXT,          -- Brief description of the source
-    manual_notes TEXT,                -- Any notes you add
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    last_reviewed_at TIMESTAMP WITH TIME ZONE
-);
+-- Optional: Index on keywords for faster searching of past enquiries
+CREATE INDEX IF NOT EXISTS idx_userenquiries_keywords ON UserEnquiries USING GIN (keywords);

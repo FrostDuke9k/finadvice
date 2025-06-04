@@ -1,374 +1,233 @@
 # main.py
 import requests
-from bs4 import BeautifulSoup
-import hashlib
+from bs4 import BeautifulSoup # May still be needed if you fetch and parse URL content
 import time
 from datetime import datetime
 import json
 
 import database
-import config
+import config # For API keys and DB URL
 
-from openai import OpenAI # Import the OpenAI library
+from openai import OpenAI
 
-# --- Helper Functions ---
-def get_content_hash(content_string):
-    """Generates an MD5 hash for a string to detect changes."""
-    if not content_string:
-        content_string = ""
-    return hashlib.md5(content_string.encode('utf-8')).hexdigest()
-
-def fetch_web_content(url, source_name):
-    """
-    Fetches web content from the given URL.
-    """
-    print(f"[{datetime.now()}] Fetching from: {url} for {source_name}")
+# --- fetch_web_content and extract_relevant_info might still be needed ---
+# --- if your app fetches content from URLs OpenAI identifies. ---
+def fetch_web_content(url, source_name="identified_source"): # source_name is less critical now
+    """ Fetches web content from the given URL. """
+    print(f"[{datetime.now()}] Fetching content from URL: {url}")
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 UKFinanceTaxMonitorBot/1.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 FinAdviceBot/2.0'
         }
         response = requests.get(url, timeout=15, headers=headers)
         response.raise_for_status() 
-        
         content_type = response.headers.get('content-type', '').lower()
         if 'text/html' in content_type or 'text/plain' in content_type or not content_type:
-            return response.text
+            # Basic cleaning of HTML before sending to AI (optional, can be more sophisticated)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Get text, remove script/style, limit length
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.decompose()
+            text = soup.get_text(separator=' ', strip=True)
+            return text[:15000] # Limit content length to manage token usage
         else:
-            print(f"[{datetime.now()}] Warning: Content type for {url} is '{content_type}', not plain text/HTML. Skipping full processing.")
+            print(f"[{datetime.now()}] Warning: Content type for {url} is '{content_type}'. Returning None.")
             return None 
-    except requests.exceptions.Timeout:
-        print(f"[{datetime.now()}] Error: Timeout while fetching {url} for {source_name}")
-        return None
-    except requests.exceptions.HTTPError as e:
-        print(f"[{datetime.now()}] Error: HTTP error {e.response.status_code} while fetching {url} for {source_name}. This site may be blocking automated access.")
-        return None
-    except requests.RequestException as e:
-        print(f"[{datetime.now()}] Error: Could not fetch {url} for {source_name}. Details: {e}")
-        return None
     except Exception as e: 
-        print(f"[{datetime.now()}] An unexpected error occurred while fetching {url} for {source_name}: {e}")
+        print(f"[{datetime.now()}] Error fetching content from {url}: {e}")
         return None
 
-def extract_relevant_info(html_content, source_name):
+def get_urls_and_initial_info_from_ai(user_question):
     """
-    Placeholder for extracting relevant information using BeautifulSoup.
-    This would need to be tailored to the structure of each specific source website.
+    Asks OpenAI to provide an initial answer/information and suggest relevant URLs
+    based on the user's question.
     """
-    if not html_content:
-        return "No content", None
-    soup = BeautifulSoup(html_content, 'html.parser')
-    title_tag = soup.find('h1')
-    first_p_tag = soup.find('p')
-    title = title_tag.get_text(strip=True) if title_tag else "No title found"
-    paragraph = first_p_tag.get_text(strip=True) if first_p_tag else "No paragraph found"
-    
-    link_url = None
-    if first_p_tag:
-        link_tag = first_p_tag.find('a')
-        if link_tag and 'href' in link_tag.attrs:
-            href = link_tag['href']
-            link_url = href 
-
-    extracted_summary = f"Title: {title} - Snippet: {paragraph[:200]}..."
-    return extracted_summary, link_url
-
-def analyze_content_for_changes_ai(previous_content_summary, current_content_summary, source_name, full_html_content=None):
-    """
-    Analyzes content changes using OpenAI API to extract structured financial/tax information.
-    """
-    print(f"[{datetime.now()}] AI Analyzing changes for {source_name} with OpenAI...")
-
+    print(f"[{datetime.now()}] Asking OpenAI to find info and URLs for: '{user_question}'")
     if not config.OPENAI_API_KEY:
-        print(f"[{datetime.now()}] Error: OPENAI_API_KEY not configured. Skipping AI analysis.")
-        return {
-            "change_type": "Configuration Error",
-            "significance_level": "High",
-            "main_summary": "OpenAI API key not found. Unable to perform AI analysis.",
-            "key_details": [],
-            "affected_parties": []
-        }
+        print(f"[{datetime.now()}] Error: OPENAI_API_KEY not configured.")
+        return {"answer": "OpenAI API key not configured.", "urls": []}
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
-    content_to_analyze = current_content_summary 
+    system_prompt = """You are an AI assistant helping a user find financial information relevant to the UK.
+Based on the user's question, provide:
+1. A direct answer or summary of information if readily available from your knowledge.
+2. A list of up to 3 potentially relevant, high-authority UK government or financial regulatory URLs if applicable.
+   Prioritize .gov.uk, .org.uk (official bodies like MoneyHelper, FCA). Avoid purely commercial sites unless they are highly reputable sources for general guidance (like NS&I).
 
-    if previous_content_summary == current_content_summary:
-        print(f"[{datetime.now()}] AI Analysis: Content summaries are identical for {source_name}. Assuming no significant semantic change.")
-        return {
-            "change_type": "No Semantic Change Detected (Summary Identical)",
-            "significance_level": "Low",
-            "main_summary": "The textual summary of the content appears identical to the previous version.",
-            "key_details": [],
-            "affected_parties": []
-        }
-
-    system_prompt = """You are a specialized AI assistant expert in UK finance and tax law.
-Your task is to analyze provided text content from UK government or financial regulatory websites.
-The content represents a new page or an update to an existing page.
-Extract structured information relevant to financial advice, tax regulations, and official schemes for UK individuals and businesses.
-You MUST output a single, valid JSON object and nothing else. Do not include any explanatory text before or after the JSON object."""
-
-    user_prompt = f"""The content from source '{source_name}' has been updated or is new.
-Previous summary snippet (if available): "{previous_content_summary[:200]}..."
-Current content snippet to analyze: "{content_to_analyze}"
-
-Please analyze the "Current content snippet" and provide a structured JSON output with the following fields:
-- "change_type": (String) Classify the type of information or change (e.g., "Tax Rate Update", "New Savings Scheme", "Regulatory Guidance Change", "Eligibility Criteria Update", "General Announcement", "Economic Outlook", "Minor Textual Correction").
-- "significance_level": (String) Estimate the significance for an average UK individual or small business (e.g., "High", "Medium", "Low", "Informational").
-- "main_summary": (String) A concise summary (2-3 sentences) of the core information or change.
-- "key_details": (Array of Strings) List specific key details, such as new rates, important dates, specific figures, names of schemes, or key conditions.
-- "affected_parties": (Array of Strings) List who is primarily affected (e.g., "Individuals", "Self-Employed", "Small Businesses", "Pensioners", "Investors", "Home Buyers", "Low-Income Earners").
-- "actionable_insights": (Array of Strings) Brief, actionable points or considerations for the affected parties. What should they potentially do or look into?
-- "referenced_regulation_or_law": (String, optional) If a specific regulation, law name, or document number is clearly mentioned as the basis for the information, state it.
-- "source_trustworthiness": (String) Based on the source name ('{source_name}'), categorize as "Official Government/Regulatory" or "General Financial Guidance".
-
-If the content seems trivial, a minor correction, or not substantially finance/tax-related, please reflect this in the "change_type" and "significance_level".
+Format your response as a single JSON object with two keys: "answer" (string) and "urls" (array of strings).
+Example: {"answer": "The current UK Personal Allowance is X.", "urls": ["https://www.gov.uk/income-tax-rates"]}
+If no specific URLs come to mind or are not appropriate for the question, provide an empty array for "urls".
 """
+    user_prompt = f"User question: \"{user_question}\"\n\nPlease provide your answer and relevant URLs in the specified JSON format."
 
     try:
-        print(f"[{datetime.now()}] Sending content for '{source_name}' to OpenAI for analysis...")
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-0125",
+            model="gpt-3.5-turbo-0125", # Or gpt-4 for better URL suggestion and info
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2
+            temperature=0.3
         )
-        
         ai_response_content = response.choices[0].message.content
-        print(f"[{datetime.now()}] Received AI analysis for {source_name}.")
-        
-        analysis_result = json.loads(ai_response_content)
-        return analysis_result
-    except json.JSONDecodeError as e:
-        print(f"[{datetime.now()}] Error: Failed to decode JSON response from AI for {source_name}. Error: {e}")
-        print(f"AI Response Content was: {ai_response_content}")
-        return {
-            "change_type": "AI Response Error", "significance_level": "Unknown",
-            "main_summary": "Failed to parse structured data from AI response.",
-            "key_details": [f"Raw AI output: {ai_response_content[:200]}..."],
-            "affected_parties": []
-        }
+        print(f"[{datetime.now()}] Received initial info and URLs from OpenAI.")
+        parsed_response = json.loads(ai_response_content)
+        return parsed_response
     except Exception as e:
-        print(f"[{datetime.now()}] Error: An unexpected error occurred during AI analysis for {source_name}: {e}")
-        return {
-            "change_type": "AI Processing Error", "significance_level": "Unknown",
-            "main_summary": f"An error occurred while communicating with or processing AI response: {str(e)}",
-            "key_details": [],
-            "affected_parties": []
-        }
+        print(f"[{datetime.now()}] Error getting initial info/URLs from OpenAI: {e}")
+        return {"answer": "Sorry, I encountered an error trying to find initial information.", "urls": []}
 
-class LawMonitorAgent:
-    def __init__(self):
-        print(f"[{datetime.now()}] LawMonitorAgent initialized. Will fetch sources from database.")
-
-    def check_for_updates(self):
-        """
-        Checks all configured active sources from the database for updates.
-        """
-        print(f"\n[{datetime.now()}] --- Starting Law Monitor Update Check ---")
-        
-        active_sources = database.get_active_sources()
-        if not active_sources:
-            print(f"[{datetime.now()}] No active sources found in the database. Ending check.")
-            return []
-
-        detected_changes_summary = []
-
-        for source_data in active_sources:
-            source_id = source_data['id']
-            source_name = source_data['name']
-            url = source_data['url']
-            previous_hash = source_data['last_content_hash']
-            previous_summary = source_data['last_summary'] if source_data['last_summary'] else "N/A (first check)"
-
-            print(f"[{datetime.now()}] Checking source: {source_name} (ID: {source_id}) from {url}")
-            
-            html_content = fetch_web_content(url, source_name) 
-
-            if not html_content:
-                print(f"[{datetime.now()}] Failed to fetch content for {source_name} or content type not suitable. Skipping.")
-                continue
-
-            current_summary, specific_url_of_change = extract_relevant_info(html_content, source_name)
-            current_hash = get_content_hash(current_summary)
-
-            if current_hash != previous_hash:
-                print(f"[{datetime.now()}] Change DETECTED for {source_name}!")
-                print(f"  Previous Hash: {previous_hash}, Current Hash: {current_hash}")
-
-                ai_analysis_result = analyze_content_for_changes_ai(previous_summary, current_summary, source_name, full_html_content=html_content)
-
-                if ai_analysis_result: 
-                    print(f"[{datetime.now()}] AI Analysis Result for {source_name}: {ai_analysis_result.get('change_type', 'N/A')} - {ai_analysis_result.get('main_summary', 'N/A')[:60]}...")
-                    
-                    database.add_detected_change(
-                        source_id=source_id,
-                        previous_hash=previous_hash,
-                        new_hash=current_hash,
-                        change_summary=ai_analysis_result.get('main_summary', current_summary), 
-                        ai_analysis=ai_analysis_result, 
-                        full_text_snippet_from_change=current_summary, 
-                        url_of_change=specific_url_of_change if specific_url_of_change else url
-                    )
-                    detected_changes_summary.append({
-                        "source": source_name,
-                        "timestamp": datetime.now().isoformat(),
-                        "url": specific_url_of_change if specific_url_of_change else url,
-                        "analysis_summary": ai_analysis_result.get('main_summary', 'N/A')
-                    })
-                else:
-                    print(f"[{datetime.now()}] AI Analysis: No significant semantic change identified for {source_name}, or AI analysis returned no result, or an error occurred in AI processing that returned None/empty.")
-
-                database.update_source_state(source_id, current_hash, current_summary)
-            else:
-                print(f"[{datetime.now()}] No change detected for {source_name} (Hash: {current_hash}).")
-
-        if detected_changes_summary:
-            print(f"\n[{datetime.now()}] --- Summary of Detected Changes This Cycle ---")
-            for change in detected_changes_summary:
-                print(f"  Source: {change['source']}, Summary: {change['analysis_summary'][:100]}...")
-        else:
-            print(f"\n[{datetime.now()}] --- No new law/regulation changes detected in this cycle. ---")
-        
-        return detected_changes_summary
-
-def synthesize_answer_with_ai(user_question, context_from_db):
+def synthesize_final_answer_with_ai(user_question, initial_ai_answer, fetched_url_contents: list):
     """
-    Uses OpenAI to synthesize a helpful answer to a user's question based on
-    context retrieved from the internal knowledge base.
+    Synthesizes a final answer using initial AI info and content fetched from URLs.
     """
-    print(f"[{datetime.now()}] Synthesizing answer for: '{user_question}' using provided context.")
-
+    print(f"[{datetime.now()}] Synthesizing final answer for: '{user_question}'")
     if not config.OPENAI_API_KEY:
-        print(f"[{datetime.now()}] Error: OPENAI_API_KEY not configured. Cannot synthesize answer.")
-        return "I am unable to process your request at this time due to a configuration issue. Please contact support."
-
-    if not context_from_db or context_from_db.strip() == "No specific information found in the local knowledge base for the given keywords." or context_from_db.strip() == "Placeholder: Internal search not yet implemented. Context from DB would go here.":
-        context_from_db = "No specific information was retrieved from the local knowledge base regarding this query."
+        return "OpenAI API key not configured. Cannot synthesize final answer."
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
+    
+    context_from_urls = "\n\n".join([f"Content from URL {i+1}:\n{content[:3000]}..." for i, content in enumerate(fetched_url_contents) if content])
+    if not context_from_urls:
+        context_from_urls = "No additional content was successfully fetched from the identified URLs."
 
     system_prompt = """You are 'FinanceAdvisor', a helpful AI assistant specializing in UK finance and tax matters.
-Your goal is to provide clear, accurate, and concise answers based *primarily* on the context provided from an internal knowledge base.
-If the provided context is insufficient to answer the question confidently, clearly state that the information is not available in the current knowledge base rather than speculating.
+Your goal is to provide a comprehensive and accurate answer to the user's question.
+You have been provided with an initial AI-generated answer and content fetched from relevant URLs.
+Integrate all this information to formulate your final response.
+If the fetched content from URLs provides more specific or up-to-date details, prioritize that.
+If the initial answer was good and the URL content doesn't add much, you can reiterate or slightly expand on the initial answer.
+If contradictions arise, point them out or use your best judgment based on what seems most authoritative (e.g., .gov.uk content).
 Always be polite and professional.
 Crucially, end every response with the following disclaimer: 'Disclaimer: This information is for guidance only and not professional financial advice. Please consult with a qualified financial advisor for advice tailored to your specific situation.'"""
 
     user_prompt = f"""User question: "{user_question}"
 
-Provided context from internal knowledge base:
+Initial AI-generated information/answer:
 ---
-{context_from_db}
+{initial_ai_answer}
 ---
 
-Based primarily on the provided context, please answer the user's question.
-If the context directly answers the question, summarize it clearly.
-If the context is related but doesn't directly answer, explain what information the context provides and why it might not fully answer the question.
-If the context is "No specific information was retrieved from the local knowledge base regarding this query." or similar, then state that you don't have specific information on that topic in your current knowledge base.
-Do not make up information beyond the provided context.
+Content fetched from potentially relevant URLs:
+---
+{context_from_urls}
+---
+
+Please synthesize a final, comprehensive answer to the user's question using all the provided information.
 Ensure the answer includes the mandatory disclaimer at the end.
 """
-
     try:
-        print(f"[{datetime.now()}] Sending question and context to OpenAI for answer synthesis...")
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-0125",
+            model="gpt-4-turbo-preview", # Use a more capable model for this synthesis task
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.5 
+            temperature=0.5
         )
-        
-        ai_answer = response.choices[0].message.content
-        print(f"[{datetime.now()}] Received synthesized answer from OpenAI.")
-        
+        final_answer = response.choices[0].message.content
         disclaimer = "Disclaimer: This information is for guidance only and not professional financial advice. Please consult with a qualified financial advisor for advice tailored to your specific situation."
-        if disclaimer not in ai_answer:
-            ai_answer += f"\n\n{disclaimer}"
-            
-        return ai_answer
-
+        if disclaimer not in final_answer:
+            final_answer += f"\n\n{disclaimer}"
+        return final_answer
     except Exception as e:
-        print(f"[{datetime.now()}] Error: An unexpected error occurred during AI answer synthesis: {e}")
-        return f"I apologize, but I encountered an error while trying to generate an answer. Please try again later.\n\n{disclaimer}"
+        print(f"[{datetime.now()}] Error synthesizing final answer with OpenAI: {e}")
+        return f"Sorry, I encountered an error refining the answer. The initial information was: {initial_ai_answer}\n\nDisclaimer: This information is for guidance only..."
 
 def handle_user_questions():
-    """Handles user questions by logging, searching DB, and synthesizing AI answers."""
+    """Handles user questions using AI for sourcing and synthesis, with caching."""
     print("\n--- Fiscal Advisor Q&A ---")
     print("Type 'quit' to exit Q&A mode.")
     while True:
         try:
-            user_question = input("Ask your finance question: ")
+            user_question = input("Ask your finance question: ").strip()
             if user_question.lower() == 'quit':
                 break
-            if not user_question.strip():
+            if not user_question:
                 continue
 
-            print(f"Received question: '{user_question}'")
-            
-            enquiry_id = database.add_user_enquiry(question_text=user_question, processing_status="processing_search")
-            if not enquiry_id:
-                print("Could not log your question to the database. Please try again.")
-                continue
+            print(f"[{datetime.now()}] Received question: '{user_question}'")
+            keywords = [kw.lower().strip('?,.') for kw in user_question.split() if len(kw.strip('?,.')) > 2]
+            print(f"[{datetime.now()}] Extracted keywords: {keywords}")
 
-            keywords = [kw.lower() for kw in user_question.split() if len(kw) > 2]
-            print(f"Searching database with keywords: {keywords}")
+            # 1. Check cache for similar, verified questions
+            cached_answer = None
+            if keywords:
+                cached_enquiries = database.search_stored_enquiries(keywords, verified_only=True)
+                if cached_enquiries:
+                    cached_answer_record = cached_enquiries[0] # Use the top one for simplicity
+                    cached_answer = cached_answer_record['ai_generated_information']
+                    database.increment_enquiry_usage_count(cached_answer_record['id'])
+                    print(f"[{datetime.now()}] Found verified cached answer (ID: {cached_answer_record['id']}).")
+                    database.add_or_update_user_enquiry( # Log this instance of asking
+                        question_text=user_question, keywords=keywords,
+                        ai_generated_information=cached_answer,
+                        source_of_answer=f"cache_hit_verified_enquiry_id_{cached_answer_record['id']}"
+                    )
 
-            search_results = database.search_knowledge_base(keywords) 
-            
-            retrieved_context_summary = ""
-            if search_results:
-                print(f"Found {len(search_results)} potentially relevant item(s) in the knowledge base:")
-                context_parts = []
-                for i, result in enumerate(search_results[:3]): 
-                    print(f"  Result {i+1} Title/Summary: {result.get('change_summary_from_agent', 'N/A')}")
-                    if result.get('raw_ai_analysis_result'):
-                        ai_summary = result['raw_ai_analysis_result'].get('main_summary', '')
-                        key_details = result['raw_ai_analysis_result'].get('key_details', [])
-                        context_parts.append(f"Found information: {ai_summary} Key details: {', '.join(key_details if isinstance(key_details, list) else [str(key_details)])}")
-                    elif result.get('change_summary_from_agent'):
-                         context_parts.append(f"Found information: {result.get('change_summary_from_agent')}")
-
-                retrieved_context_summary = " ".join(context_parts)
-                if not retrieved_context_summary.strip():
-                     retrieved_context_summary = "Found some database entries but could not form a concise text summary from them."
-                print(f"Context for AI: {retrieved_context_summary[:500]}...") 
+            final_response_to_user = None
+            if cached_answer:
+                final_response_to_user = cached_answer
             else:
-                print("No directly relevant information found in the current knowledge base for your keywords.")
-                retrieved_context_summary = "No specific information found in the local knowledge base for the given keywords."
+                print(f"[{datetime.now()}] No suitable cached answer. Proceeding with live AI sourcing.")
+                # Log initial enquiry before potentially lengthy AI calls
+                enquiry_id = database.add_or_update_user_enquiry(question_text=user_question, keywords=keywords, source_of_answer="pending_ai_processing")
+                if not enquiry_id:
+                    print("Failed to log initial enquiry. Aborting.")
+                    continue
 
-            generated_answer_text = synthesize_answer_with_ai(user_question, retrieved_context_summary)
-            
-            processing_status = "answered" if "I could not find specific information" not in generated_answer_text and "encountered an error" not in generated_answer_text else "no_info_found"
-            database.update_user_enquiry_answer(enquiry_id, retrieved_context_summary[:2000], generated_answer_text, processing_status=processing_status) 
-            
-            print(f"\nFinanceAdvisor says:\n{generated_answer_text}\n")
+                # Step 1: Get initial info and URLs from AI
+                ai_sourcing_result = get_urls_and_initial_info_from_ai(user_question)
+                initial_ai_answer = ai_sourcing_result.get("answer", "AI could not provide initial information.")
+                identified_urls = ai_sourcing_result.get("urls", [])
+                
+                print(f"[{datetime.now()}] Initial AI answer: {initial_ai_answer[:200]}...")
+                print(f"[{datetime.now()}] AI identified URLs: {identified_urls}")
+
+                # Step 2: Fetch content from identified URLs (if any)
+                fetched_contents = []
+                if identified_urls:
+                    for url in identified_urls[:2]: # Limit to fetching, say, top 2 URLs to manage time/cost
+                        content = fetch_web_content(url)
+                        if content:
+                            fetched_contents.append(content)
+                
+                fetched_content_summary_for_db = " ".join([c[:500]+"..." for c in fetched_contents]) if fetched_contents else None
+
+                # Step 3: Synthesize final answer
+                final_response_to_user = synthesize_final_answer_with_ai(user_question, initial_ai_answer, fetched_contents)
+                
+                # Step 4: Store the new Q&A pair
+                database.add_or_update_user_enquiry(
+                    enquiry_id=enquiry_id, # Update the existing record
+                    question_text=user_question, keywords=keywords,
+                    ai_generated_information=final_response_to_user,
+                    ai_identified_urls=identified_urls if identified_urls else None,
+                    fetched_content_summary=fetched_content_summary_for_db,
+                    source_of_answer="live_ai_synthesis_with_url_content" if fetched_contents else "live_ai_synthesis_general_knowledge",
+                    is_verified=False # New AI answers are not verified by default
+                )
+
+            print(f"\nFinanceAdvisor says:\n{final_response_to_user}\n")
 
         except Exception as e:
-            print(f"An error occurred in the Q&A loop: {e}")
+            print(f"[{datetime.now()}] An error occurred in the Q&A loop: {e}")
+            import traceback
+            traceback.print_exc()
 
-# --- Main execution / Example Usage ---
+# --- Main execution ---
 if __name__ == "__main__":
-    print("Initializing UK Finance & Tax Law Monitor Agent...")
+    print("Initializing UK Finance & Tax Law Fiscal Advisor...")
     
     print("Executing database schema (if needed)...")
     database.execute_schema() 
     
-    print("Initializing/Verifying sources in database from CSV...")
-    database.initialize_sources()
-
-    agent = LawMonitorAgent()
+    # No proactive monitoring agent in this new approach
+    # No initial source loading from CSV in this new approach
 
     try:
-        print("\nRunning an initial check for website updates...")
-        agent.check_for_updates() 
-        print("\nInitial website update check complete.")
-
-        handle_user_questions()
-
+        handle_user_questions() # Directly go to Q&A mode
     except KeyboardInterrupt:
         print("\nApplication stopped by user.")
     finally:
